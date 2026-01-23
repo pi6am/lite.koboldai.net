@@ -1,7 +1,7 @@
 # KoboldAI Lite
 ## [lite.koboldai.net](https://lite.koboldai.net)
 
-This is a standalone Web UI for KoboldAI Client, KoboldCpp and AI Horde, which requires no dependencies, installation or setup. It's also capable of connecting to custom endpoints, include OpenAI, Claude, and both local and remote Kobold instances.
+This is a standalone Web UI for KoboldAI Client, KoboldCpp and AI Horde, which requires no dependencies, installation or setup. It's also capable of connecting to custom endpoints, including OpenAI, Claude, and both local and remote Kobold instances.
 
 ![Preview1](preview1.png)
 ![Preview2](preview2.png)
@@ -19,7 +19,7 @@ Features:
     - Instruct Mode - ChatGPT styled instruction-response
 - Mobile friendly, runs on practically any device.
 - Compatible with many file formats, including Tavern AI cards, both versions of KoboldAI save formats, KAISTORY exports, and Ooba export files.
-- Inbuilt library of customized premade scenarios, also supports custom scenarios from Aetherroom.
+- Inbuilt library of customized premade scenarios, also supports custom scenarios from third party sites.
 - Easily export and share your stories with embedded sharable links.
 - Supports KoboldAI features such as memory, author's note, and world info, entirely within this UI.
 - Undo, redo, retry or edit any part of the text at any time.
