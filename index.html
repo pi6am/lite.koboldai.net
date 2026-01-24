@@ -3934,6 +3934,7 @@ Current version indicated by LITEVER below.
 	const poll_interval_base_img = 3800;
 	const poll_interval_idle = 1000;
 	const poll_interval_multiplayer = 1000; //every 1s
+	const poll_interval_chunked_tts = 300;
 	const max_branches = 6;
 
 	const horde_base_url = "https://aihorde.net"
@@ -4292,6 +4293,7 @@ Current version indicated by LITEVER below.
 		narrate_targets: 1, //0=nobody, 1=ai only, 2=both sides
 		narrate_only_dialog: false,
 		embed_narrations: false,
+		tts_stream: false,
 		voice_end_delay: 300,
 		voice_suppress_nonspeech: false,
 		voice_langcode: "auto",
@@ -5524,6 +5526,7 @@ Current version indicated by LITEVER below.
 	setInterval(poll_image_db, poll_interval_base_img); //check images every Xs
 	setInterval(poll_idle_responses, poll_interval_idle); //a basic update loop for idle responses
 	setInterval(poll_multiplayer, poll_interval_multiplayer); //a basic update loop for idle responses
+	setInterval(poll_chunked_tts, poll_interval_chunked_tts);
 
 	attempt_connect(false);
 
@@ -15355,6 +15358,7 @@ Current version indicated by LITEVER below.
 		document.getElementById("narrate_targets").value = localsettings.narrate_targets;
 		document.getElementById("narrate_only_dialog").checked = localsettings.narrate_only_dialog;
 		document.getElementById("embed_narrations").checked = localsettings.embed_narrations;
+		document.getElementById("tts_stream").checked = localsettings.tts_stream;
 		document.getElementById("tts_speed").value = localsettings.tts_speed;
 		document.getElementById("voice_end_delay").value = localsettings.voice_end_delay;
 		document.getElementById("voice_suppress_nonspeech").checked = localsettings.voice_suppress_nonspeech;
@@ -15961,6 +15965,7 @@ Current version indicated by LITEVER below.
 		localsettings.narrate_targets = document.getElementById("narrate_targets").value;
 		localsettings.narrate_only_dialog = (document.getElementById("narrate_only_dialog").checked?true:false);
 		localsettings.embed_narrations = (document.getElementById("embed_narrations").checked?true:false);
+		localsettings.tts_stream = (document.getElementById("tts_stream").checked?true:false);
 		localsettings.tts_speed = document.getElementById("tts_speed").value;
 		localsettings.voice_end_delay = document.getElementById("voice_end_delay").value;
 		localsettings.voice_suppress_nonspeech = (document.getElementById("voice_suppress_nonspeech").checked?true:false);
@@ -16963,7 +16968,10 @@ Current version indicated by LITEVER below.
 	}
 
 	function restart_new_game(save = true, keep_memory = false) {
-		xtts_is_playing = false;
+		tts_is_playing = false;
+		tts_is_processing = false;
+		tts_speak_input_queue = [];
+		tts_speak_output_queue = [];
 		idle_timer = 0;
 		idle_triggered_counter = 0;
 		gametext_arr = [];
@@ -17906,7 +17914,8 @@ Current version indicated by LITEVER below.
 	}
 
 	var xtts_is_connected = false;
-	var xtts_is_playing = false;
+	var tts_is_playing = false;
+	var tts_is_processing = false;
 	function fetch_xtts_voices(silent, is_xtts)
 	{
 		if(!xtts_is_connected)
@@ -18021,6 +18030,7 @@ Current version indicated by LITEVER below.
 		document.getElementById("kcpp_tts_container").classList.add("hidden");
 		document.getElementById("webbrowser_tts_container").classList.add("hidden");
 		document.getElementById("savenarrationsdiv").classList.add("hidden");
+		document.getElementById("narratestreamingdiv").classList.add("hidden");
 
 		const selectedTTS = document.getElementById("ttsselect").value;
 
@@ -18042,14 +18052,17 @@ Current version indicated by LITEVER below.
 			}
 			fetch_xtts_voices(true, selectedTTS == XTTS_ID);
 			document.getElementById("savenarrationsdiv").classList.remove("hidden");
+			document.getElementById("narratestreamingdiv").classList.remove("hidden");
 		}
 		else if(selectedTTS == OAI_TTS_ID) {
 			document.getElementById("oai_tts_container").classList.remove("hidden");
 			document.getElementById("savenarrationsdiv").classList.remove("hidden");
+			document.getElementById("narratestreamingdiv").classList.remove("hidden");
 		}else if(selectedTTS == POLLINATIONS_TTS_ID)
 		{
 			document.getElementById("pollinations_tts_container").classList.remove("hidden");
 			document.getElementById("savenarrationsdiv").classList.remove("hidden");
+			document.getElementById("narratestreamingdiv").classList.remove("hidden");
 		}
 		else if(selectedTTS == KCPP_TTS_ID) {
 			document.getElementById("kcpp_tts_container").classList.remove("hidden");
@@ -18061,6 +18074,7 @@ Current version indicated by LITEVER below.
 			}
 			adjust_kcpptts_controls();
 			document.getElementById("savenarrationsdiv").classList.remove("hidden");
+			document.getElementById("narratestreamingdiv").classList.remove("hidden");
 		}
 		else if(selectedTTS == WEBBROWSER_TTS_ID)
 		{
@@ -18101,11 +18115,11 @@ Current version indicated by LITEVER below.
 		const pitchSlider = document.getElementById("alltalk_rvc_pitch");
 		const pitchValue = document.getElementById("alltalk_rvc_pitch_value");
 		pitchValue.textContent = pitchSlider.value;
-		const streamingMode = (document.getElementById("alltalk_streaming").checked ? true : false);
+		const altEp = (document.getElementById("alltalk_alternate_ep").checked ? true : false);
 		const rvcSelect = document.getElementById("alltalk_rvc_voice");
 		const rvcPitch = document.getElementById("alltalk_rvc_pitch");
-		rvcSelect.disabled = streamingMode;
-		rvcPitch.disabled = streamingMode;
+		rvcSelect.disabled = altEp;
+		rvcPitch.disabled = altEp;
 	}
 
 	function adjust_kcpptts_controls() {
@@ -18173,7 +18187,51 @@ Current version indicated by LITEVER below.
 		reader.readAsDataURL(file);
 	}
 
+	var tts_speak_input_queue = [];
+	var tts_speak_output_queue = [];
 	function tts_speak(text, do_download=false, do_embed_tts=false, is_test=false)
+	{
+		let ssval = localsettings.tts_mode;
+		let streamallowed = (ssval==XTTS_ID || ssval==ALLTALK_ID || ssval==OAI_TTS_ID || ssval==KCPP_TTS_ID || ssval==POLLINATIONS_TTS_ID);
+		if(streamallowed && localsettings.tts_stream && !is_test && !do_embed_tts && !do_download)
+		{
+			//split into chunks by newline
+			tts_speak_output_queue = [];
+			tts_speak_input_queue = text.split("\n").map(chunk => chunk.trim()).filter(chunk => chunk.length > 0);
+		}
+		else
+		{
+			tts_speak_direct(text,do_download,do_embed_tts,is_test,false);
+		}
+	}
+	function poll_chunked_tts()
+	{
+		if(tts_speak_input_queue.length>0 && !tts_is_processing && tts_speak_output_queue.length < 3)
+		{
+			let firstChunk = tts_speak_input_queue.shift();
+			tts_speak_direct(firstChunk,false,false,false,true);
+		}
+		if(tts_speak_output_queue.length > 0 && !tts_is_playing)
+		{
+			let firstAudio = tts_speak_output_queue.shift();
+			const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+			const playSound = audioContext.createBufferSource();
+			playSound.buffer = firstAudio;
+			playSound.connect(audioContext.destination);
+			tts_is_playing = true;
+			update_submit_button(false);
+			playSound.start(audioContext.currentTime);
+			playSound.onended = function() {
+				setTimeout(() => {
+					tts_is_playing = false;
+					update_submit_button(false);
+					console.log("Audio finished playing");
+				},100);
+			};
+		}
+	}
+
+	function tts_speak_direct(text, do_download=false, do_embed_tts=false, is_test=false, append_to_outqueue=false)
 	{
 		if(!text || text=="" || text.trim()=="")
 		{
@@ -18226,6 +18284,8 @@ Current version indicated by LITEVER below.
 			let is_pollinations_tts = (ssval==POLLINATIONS_TTS_ID);
 			const audioContext = new (window.AudioContext || window.webkitAudioContext)();
 			let audiofile_ref = null;
+
+			tts_is_processing = true;
 
 			if(is_oai_tts || is_kcpp_tts)
 			{
@@ -18280,20 +18340,30 @@ Current version indicated by LITEVER below.
 					{
 						tts_embed_audio(audiofile_ref);
 					}
-					const playSound = audioContext.createBufferSource();
-					playSound.buffer = decodedData;
-					playSound.connect(audioContext.destination);
-					xtts_is_playing = true;
-					update_submit_button(false);
-					playSound.start(audioContext.currentTime);
-					playSound.onended = function() {
-						setTimeout(() => {
-							xtts_is_playing = false;
-							update_submit_button(false);
-							console.log("Audio finished playing");
-						},300);
-					};
+					tts_is_processing = false;
+					if(append_to_outqueue)
+					{
+						tts_speak_output_queue.push(decodedData);
+					}
+					else
+					{
+						const playSound = audioContext.createBufferSource();
+						playSound.buffer = decodedData;
+						playSound.connect(audioContext.destination);
+						tts_is_playing = true;
+						update_submit_button(false);
+						playSound.start(audioContext.currentTime);
+						playSound.onended = function() {
+							setTimeout(() => {
+								tts_is_playing = false;
+								update_submit_button(false);
+								console.log("Audio finished playing");
+							},300);
+						};
+					}
 				}).catch((error) => {
+					tts_is_playing = false;
+					tts_is_processing = false;
 					console.log("XTTS Speak Error: " + error);
 				});
 			}
@@ -18326,20 +18396,30 @@ Current version indicated by LITEVER below.
 					{
 						tts_embed_audio(audiofile_ref);
 					}
-					const playSound = audioContext.createBufferSource();
-					playSound.buffer = decodedData;
-					playSound.connect(audioContext.destination);
-					xtts_is_playing = true;
-					update_submit_button(false);
-					playSound.start(audioContext.currentTime);
-					playSound.onended = function() {
-						setTimeout(() => {
-							xtts_is_playing = false;
-							update_submit_button(false);
-							console.log("Audio finished playing");
-						},300);
-					};
+					tts_is_processing = false;
+					if(append_to_outqueue)
+					{
+						tts_speak_output_queue.push(decodedData);
+					}
+					else
+					{
+						const playSound = audioContext.createBufferSource();
+						playSound.buffer = decodedData;
+						playSound.connect(audioContext.destination);
+						tts_is_playing = true;
+						update_submit_button(false);
+						playSound.start(audioContext.currentTime);
+						playSound.onended = function() {
+							setTimeout(() => {
+								tts_is_playing = false;
+								update_submit_button(false);
+								console.log("Audio finished playing");
+							},300);
+						};
+					}
 				}).catch((error) => {
+					tts_is_playing = false;
+					tts_is_processing = false;
 					console.log("Pollinations Speak Error: " + error);
 				});
 			}
@@ -18373,21 +18453,30 @@ Current version indicated by LITEVER below.
 						{
 							tts_embed_audio(audiofile_ref);
 						}
-						const playSound = audioContext.createBufferSource();
-						playSound.buffer = decodedData;
-						playSound.connect(audioContext.destination);
-						xtts_is_playing = true;
-						update_submit_button(false);
-						playSound.start(audioContext.currentTime);
-						playSound.onended = function() {
-							setTimeout(() => {
-								xtts_is_playing = false;
-								update_submit_button(false);
-								console.log("Audio finished playing");
-							},300);
-						};
+						tts_is_processing = false;
+						if(append_to_outqueue)
+						{
+							tts_speak_output_queue.push(decodedData);
+						}
+						else
+						{
+							const playSound = audioContext.createBufferSource();
+							playSound.buffer = decodedData;
+							playSound.connect(audioContext.destination);
+							tts_is_playing = true;
+							update_submit_button(false);
+							playSound.start(audioContext.currentTime);
+							playSound.onended = function() {
+								setTimeout(() => {
+									tts_is_playing = false;
+									update_submit_button(false);
+									console.log("Audio finished playing");
+								},300);
+							};
+						}
 					}).catch((error) => {
-						xtts_is_playing = false;
+						tts_is_playing = false;
+						tts_is_processing = false;
 						update_submit_button(false);
 						console.log("XTTS Speak Error: " + error);
 					});
@@ -18395,26 +18484,34 @@ Current version indicated by LITEVER below.
 				else
 				{
 					//alltalk
-					const isStreaming = (document.getElementById("alltalk_streaming").checked ? true : false);
+					const isAlltalkAltEp = (document.getElementById("alltalk_alternate_ep").checked ? true : false);
 
 					let playDecodedAllTalkData = function(decodedData)
 					{
-						const playSound = audioContext.createBufferSource();
-						playSound.buffer = decodedData;
-						playSound.connect(audioContext.destination);
-						xtts_is_playing = true;
-						update_submit_button(false);
-						playSound.start(audioContext.currentTime);
-						playSound.onended = function() {
-							setTimeout(() => {
-								xtts_is_playing = false;
-								update_submit_button(false);
-								console.log("Audio finished playing");
-							},300);
-						};
+						tts_is_processing = false;
+						if(append_to_outqueue)
+						{
+							tts_speak_output_queue.push(decodedData);
+						}
+						else
+						{
+							const playSound = audioContext.createBufferSource();
+							playSound.buffer = decodedData;
+							playSound.connect(audioContext.destination);
+							tts_is_playing = true;
+							update_submit_button(false);
+							playSound.start(audioContext.currentTime);
+							playSound.onended = function() {
+								setTimeout(() => {
+									tts_is_playing = false;
+									update_submit_button(false);
+									console.log("Audio finished playing");
+								},300);
+							};
+						}
 					}
 
-					if (isStreaming) {
+					if (isAlltalkAltEp) {
 						// Create a URLSearchParams object for streaming
 						const params = new URLSearchParams({
 							text: text,
@@ -18444,7 +18541,8 @@ Current version indicated by LITEVER below.
 						})
 						.catch((error) => {
 							console.log("AllTalk v2 Speak Error:", data);
-							xtts_is_playing = false;
+							tts_is_playing = false;
+							tts_is_processing = false;
 							update_submit_button(false);
 						});
 
@@ -18499,18 +18597,21 @@ Current version indicated by LITEVER below.
 										})
 										.catch((error) => {
 											console.log("AllTalk v2 Speak Error:", data);
-											xtts_is_playing = false;
+											tts_is_playing = false;
+											tts_is_processing = false;
 											update_submit_button(false);
 										});
 									} else {
 										console.log("AllTalk Generation Error:", data);
-										xtts_is_playing = false;
+										tts_is_playing = false;
+										tts_is_processing = false;
 										update_submit_button(false);
 									}
 								})
 								.catch((error) => {
 									console.log("AllTalk Request Error:", error);
-									xtts_is_playing = false;
+									tts_is_playing = false;
+									tts_is_processing = false;
 									update_submit_button(false);
 								});
 							}
@@ -18532,13 +18633,15 @@ Current version indicated by LITEVER below.
 									playDecodedAllTalkData(decodedData);
 								}).catch((error) => {
 									console.log("AllTalk v1 Speak Error: " + error);
-									xtts_is_playing = false;
+									tts_is_playing = false;
+									tts_is_processing = false;
 									update_submit_button(false);
 								});
 							}
 						}).catch((error) => {
 							console.log("AllTalk Non-Stream Req Error: " + error);
-							xtts_is_playing = false;
+							tts_is_playing = false;
+							tts_is_processing = false;
 							update_submit_button(false);
 						});
 					}
@@ -21758,7 +21861,7 @@ Current version indicated by LITEVER below.
 				}
 			}
 
-			if(localsettings.inject_chatnames_instruct)
+			if(localsettings.inject_chatnames_instruct && localsettings.includedefaultstops)
 			{
 				let st2 = mychatname + "\:";
 				let et2 = localsettings.chatopponent + "\:";
@@ -22288,7 +22391,7 @@ Current version indicated by LITEVER below.
 		return (voice_typing_mode>0 && is_using_kcpp_with_whisper()
 			&& !document.getElementById("btnsend").disabled
 			&& !voice_is_processing && !voice_is_recording && isVoiceInputConfigured
-			&& !currentlySpeaking && !xtts_is_playing && !is_popup_open());
+			&& !currentlySpeaking && !tts_is_playing && !is_popup_open());
 	}
 
 	// AUDIO MANIPULATION FUNCTIONS
@@ -29162,9 +29265,9 @@ Current version indicated by LITEVER below.
 							</div>
 							<div id="alltalk_specific_controls" class="hidden">
 								<div class="settinglabel">
-									<div class="justifyleft">Audio streaming </div>
+									<div class="justifyleft">AllTalk new API </div>
 									<div class="push-right">
-									<input title="AllTalk Streaming" onchange="adjust_alltalk_controls();" type="checkbox" id="alltalk_streaming">
+									<input title="AllTalk New API" onchange="adjust_alltalk_controls();" type="checkbox" id="alltalk_alternate_ep">
 									</div>
 								</div>
 								<div class="settinglabel">
@@ -29276,6 +29379,12 @@ Current version indicated by LITEVER below.
 						<div class="settinglabel" id="savenarrationsdiv">
 							<div class="justifyleft"  title="Try to save and embed TTS narration files into story if possible. Does not work for internal browser TTS. Not recommend due to large size.">Save narrations </div>
 							<input title="Save Narrations" type="checkbox" id="embed_narrations" class="push-right">
+						</div>
+						<div class="settinglabel" id="narratestreamingdiv">
+							<div class="justifyleft">Narration streaming </div>
+							<div class="push-right">
+							<input title="Narration Streaming" type="checkbox" id="tts_stream">
+							</div>
 						</div>
 
 					</div>
@@ -30051,8 +30160,8 @@ Current version indicated by LITEVER below.
 				You can use this to connect to a KoboldCpp or KoboldAI instance running via a remote tunnel such as <span class="color_orange" style="font-weight: bold;">trycloudflare, localtunnel, ngrok</span>.<br><br>
 				You can use the remote address displayed in the <span class="color_orange" style="font-weight: bold;">terminal console</span> or <span class="color_orange" style="font-weight: bold;">colab window</span>, note that the model must be loaded first.<br><br>
 				<span class="color_green" style="font-weight: bold;">Please input URL of the KoboldCpp or KoboldAI instance.</span><br><br>
-				<input class="form-control" title="Enter KoboldCpp Custom Endpoint" id="customkoboldendpoint" placeholder="https://sample-remote-address.trycloudflare.com" value="">
-				<input class="form-control" title="Enter KoboldCpp API Key" type="password" id="customkoboldkey" placeholder="KoboldAI API Key (Optional)" value="" onfocus="focus_api_keys()" onblur="blur_api_keys()"><br>
+				<input class="form-control" name="username" autocomplete="username" title="Enter KoboldCpp Custom Endpoint" id="customkoboldendpoint" placeholder="https://sample-remote-address.trycloudflare.com" value="">
+				<input class="form-control" name="password" autocomplete="current-password" title="Enter KoboldCpp API Key" type="password" id="customkoboldkey" placeholder="KoboldAI API Key (Optional)" value="" onfocus="focus_api_keys()" onblur="blur_api_keys()"><br>
 				<div class="borderbox flex push-right">
 					<input type="checkbox" id="corsproxy_kai" title="Use CORS Proxy">
 					<div class="box-label">Use CORS Proxy <span class="helpicon">?<span class="helptext">Attempts to use a CORS proxy to bypass CORS restrictions. Only use this if normal connections fail. Only works on public internet APIs.</span></span></div>
@@ -30102,8 +30211,8 @@ Current version indicated by LITEVER below.
 				<span class="color_green" style="font-weight: bold;">Please input Nvidia NIM Key.</span><br><br>
 				</div>
 
-				<input class="form-control" type="text" id="custom_oai_endpoint" placeholder="OpenAI API URL" value="" onblur="">
-				<input class="form-control" type="password" id="custom_oai_key" placeholder="API Key (Required)" value="" onfocus="focus_api_keys()" onblur="blur_api_keys()"><br>
+				<input class="form-control" name="username" autocomplete="username" type="text" id="custom_oai_endpoint" placeholder="OpenAI API URL" value="" onblur="">
+				<input class="form-control" name="password" autocomplete="current-password" type="password" id="custom_oai_key" placeholder="API Key (Required)" value="" onfocus="focus_api_keys()" onblur="blur_api_keys()"><br>
 				Model Choice:<br>
 				<select title="OpenAI Model Selection" style="padding:4px;display:inline;width:calc(100% - 220px)" class="form-control" id="custom_oai_model" onchange="oai_model_change(true)">
 					<option value="gpt-3.5-turbo-instruct" selected="selected">gpt-3.5-turbo-instruct</option>
